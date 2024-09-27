@@ -17,8 +17,8 @@ This project processes `.tif` video files to track and analyze thrombi and plate
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/yourusername/your-repo-name.git
-   cd your-repo-name
+   git clone https://github.com/lerakaneva/tracking_tool.git
+   cd tracking_tool
    ```
    
 2. **Install dependencies**:
