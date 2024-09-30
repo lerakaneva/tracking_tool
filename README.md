@@ -1,10 +1,6 @@
-Here's a concise `README.md` for your project:
+# Track Platelets and Analyze Thrombi
 
----
-
-# Track and Analyze Thrombi in Video Files
-
-This project processes `.tif` video files to track and analyze thrombi and platelet movements.
+This project processes `.tif` files with platelets and thrombi masks to track and analyze thrombi statistics and platelet movements.
 
 ## Features
 
