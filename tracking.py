@@ -365,7 +365,7 @@ def filter_tracks_by_displacement_and_duration(
     return filtered_tracks, bumped_tracks, motionless_tracks, direction_tracks, turn_angle_tracks, other_tracks
 
 
-def track_trackpy(plt_labels, pixel_size, init_vid, view=True, view_modes=[ViewMode.ROLLING]):
+def track_trackpy(plt_labels, pixel_size, init_vid, view=True, view_modes=[ViewMode.ROLLING], napari_file=None):
     """
     Tracks objects in a video using TrackPy, shows tracks using napari (optional).
 
@@ -375,6 +375,7 @@ def track_trackpy(plt_labels, pixel_size, init_vid, view=True, view_modes=[ViewM
         init_vid (np.ndarray): The original video data (used for visualization if view is True).
         view (bool, optional): Whether to display the tracks in Napari (default: True).
         view_modes (list[ViewMode], optional): A list of view modes to activate.
+        napari_file: file to store napari layers
 
     Returns:
         tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -429,7 +430,8 @@ def track_trackpy(plt_labels, pixel_size, init_vid, view=True, view_modes=[ViewM
             viewer.add_tracks(napari_turn_angle, name='Invalid Turn Angles')
 
         napari.run()
-        #export_napari_layers(viewer, '')
+        if napari_file is not None:
+            export_napari_layers(viewer, napari_file)
 
     return filtered_tracks, bumped_tracks, motionless_tracks, direction_tracks, turn_angle_tracks, other_tracks
 
@@ -499,10 +501,27 @@ def analyze_stacks(data_folder, file_name):
     time_preprocess = time.time() - start_time_preprocess
     print(f"Preprocessing is complete for {file_name}. Elapsed time: {time_preprocess}")
 
+    napari_file_dir = os.path.join(data_folder, "Napari")
+    if not os.path.exists(napari_file_dir):
+        os.makedirs(napari_file_dir, exist_ok=True)
+        
     # Updated to capture 'other_tracks' as well
-    final_tracks, bumped_tracks, motionless_tracks, direction_tracks, turn_angles_tracks, other_tracks = track_trackpy(
-        plt_labels=plt_labels, pixel_size=PIXEL_SIZE, init_vid=vid, view=False, view_modes=[ViewMode.ROLLING, ViewMode.MOTIONLESS, ViewMode.BUMPED, ViewMode.INVALID_DIRECTION, ViewMode.INVALID_TURN_ANGLE]
+    final_tracks, bumped_tracks, motionless_tracks, direction_tracks, \
+    turn_angles_tracks, other_tracks = track_trackpy(
+        plt_labels=plt_labels,
+        pixel_size=PIXEL_SIZE,
+        init_vid=vid,
+        view=True,
+        view_modes=[
+            ViewMode.ROLLING, 
+            ViewMode.MOTIONLESS, 
+            ViewMode.BUMPED, 
+            ViewMode.INVALID_DIRECTION, 
+            ViewMode.INVALID_TURN_ANGLE
+        ],
+        napari_file=os.path.join(napari_file_dir, file_name)
     )
+
 
     # Evaluate the generated tracks
     evaluate_tracks(tracks=final_tracks, pixel_size=PIXEL_SIZE, folder=data_folder,
