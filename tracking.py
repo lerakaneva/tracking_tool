@@ -1,583 +1,450 @@
 import argparse
-from pathlib import Path
-from tracking_functions import *
 import time
 from skimage import io
 from skimage.measure import label, regionprops
 import napari
 import trackpy as tp
 import logging
+import os
+import csv
+import numpy as np
+import pandas as pd
 
 # Suppress trackpy logging
 logging.getLogger('trackpy').setLevel(logging.WARNING)
 import tifffile as tiff
-from enum import Enum
 
-THROMBI_NUM_FOLDER = 'ThrombiNumbers'
-THROMBI_AREAS_FOLDER = 'ThrombiAreas'
+THROMBI_NUM_SUBFOLDER = 'ThrombiNumbers'
+THROMBI_AREAS_SUBFOLDER = 'ThrombiAreas'
+TRACKED_SUBFOLDER = 'Tracked CSV'
+NAPARI_SUBFOLDER = 'Napari'
+
+THROMBI_AREAS_SUFFIX = '_thrombi_areas.csv'
+THROMBI_NUMBER_SUFFIX = '_thrombi_number.csv'
+TRACKED_SUFFIX = '_tracked.csv'
+
 PLT_REMAPPING = [(0, 0), (1, 0), (2, 1)]
 THROMBI_REMAPPING = [(0, 0), (1, 1), (2, 0)]
 PIXEL_SIZE = 0.431
-DT = 0.05
 
-class ViewMode(Enum):
-    """View mode for platelet tracks
+class VideoProcessor:
     """
-    ROLLING = 'rolling'
-    BUMPED = 'bumped'
-    MOTIONLESS = 'motionless'
-    INVALID_DIRECTION = 'invalid_direction'
-    INVALID_TURN_ANGLE = 'invalid_turn_angle'
-
-
-def crop_video(vid):
-    """Crops a 3D numpy array representing a video stack by removing empty rows along the y-axis.
-
-    Args:
-        vid (ndarray of dtype int):
-            A 3D numpy array representing a video stack with dimensions (depth, height, width).
-            The array should contain pixel values where non-zero values are considered for cropping.
-
-    Raises:
-        ValueError: Raises ValueError when all pixels are zero
-
-    Returns:
-        ndarray of dtype int:
-            A cropped 3D numpy array with the same depth and width as the input,
-            but with reduced height such that only rows containing
-            non-zero values are retained.
-    Notes:
-        - The function assumes that the input video stack is a numpy array.
-        - Non-zero values are defined as values strictly greater than 1.
-        - The cropping is performed along the y-axis (height).
+    Handles loading, preprocessing, and saving of video data.
     """
+    def __init__(self, pixel_size=PIXEL_SIZE):
+        self.pixel_size = pixel_size
 
-    # Find the indices where any value in time (axis=0) is greater than 1
-    y_indices = np.any(vid > 1, axis=0)
+    def load_file(self, file_path):
+        """
+        Loads a .tif image stack.
 
-    # Find the rows (y-axis) where there are non-zero values
-    non_zero_rows = np.any(y_indices, axis=1)
+        Args:
+            file_path (str): The path to the .tif file.
 
-    if not np.any(non_zero_rows):
-        raise ValueError("Video has no non-zero rows.")
+        Returns:
+            ndarray: The loaded image stack as a NumPy array.
+        """
+        return io.imread(file_path)
 
-    # Get the overall top and bottom y indices
-    overall_low_y = np.argmax(non_zero_rows) # first non-zero column
-    overall_top_y = len(non_zero_rows) - np.argmax(non_zero_rows[::-1]) - 1 # last non-zero col
+    def crop_video(self, vid):
+        """Crops a 3D numpy array representing a video stack.
 
-    # Crop the stack
-    cropped_stack = vid[:, overall_low_y:overall_top_y + 1, :]
+        Removes empty rows along the y-axis.
 
-    return cropped_stack
+        Args:
+            vid (ndarray of dtype int):
+                A 3D numpy array representing a video stack with dimensions (depth, height, width).
+                The array should contain pixel values where non-zero values are considered for cropping.
+
+        Raises:
+            ValueError: If all pixels are zero.
+
+        Returns:
+            ndarray of dtype int:
+                A cropped 3D numpy array with the same depth and width as the input,
+                but with reduced height such that only rows containing
+                non-zero values are retained.
+        Notes:
+            - The function assumes that the input video stack is a numpy array.
+            - Non-zero values are defined as values strictly greater than 1.
+            - The cropping is performed along the y-axis (height).
+        """
+
+        # Find the indices where any value in time (axis=0) is greater than 1
+        y_indices = np.any(vid > 1, axis=0)
+
+        # Find the rows (y-axis) where there are non-zero values
+        non_zero_rows = np.any(y_indices, axis=1)
+
+        if not np.any(non_zero_rows):
+            raise ValueError("Video has no non-zero rows.")
+
+        # Get the overall top and bottom y indices
+        overall_low_y = np.argmax(non_zero_rows) # first non-zero column
+        overall_top_y = len(non_zero_rows) - np.argmax(non_zero_rows[::-1]) - 1 # last non-zero col
+
+        # Crop the stack
+        cropped_stack = vid[:, overall_low_y:overall_top_y + 1, :]
+
+        return cropped_stack
 
 
-def remap_and_label_image(frame_image, mapping):
-    """Remaps image and labels connected pixels 
-    
-    Args:
-        frame_image (ndarray of dtype int):
-            Image to remap and label.
-        mapping (list of tuples):
-            First value in tuple - remap from, second - remap to.
+    def _write_csv_data(self, file_path, data):
+        """
+        Writes data to a CSV file.
 
-    Returns:
-        labels (ndarray of dtype int):
-            Remapped and labeled array.
+        Args:
+            file_path (str): The path to the output CSV file.
+            data (pd.DataFrame or list): The data to be written to the file. 
+                                         If a list is provided, each item will be written on a separate line.
+
+        Raises:
+            IOError: If there is an error writing to the file.
+            OSError: If there is an error accessing the file or directory.
+        """
+        try:
+            with open(file_path, 'w', newline='') as csv_file:
+                writer = csv.writer(csv_file)
+                if isinstance(data, pd.DataFrame):
+                    data.to_csv(csv_file, index=False)
+                elif isinstance(data, list):
+                    for item in data:
+                        writer.writerow([item])  # Write each item on a separate line
+                else:
+                    print(f"Warning: Data type not supported for CSV writing: {type(data)}")
+        except (IOError, OSError) as e:
+            print(f"Error writing to file: {e}")
+
+    def save_data(self, file_path, data):
+        """
+        Writes data to a CSV file, creating the directory if it doesn't exist.
+
+        Args:
+            file_path (str): The path to the output CSV file.
+            data (list): The data to be written to the file.
+        """
+        directory_path = os.path.dirname(file_path)
+        if not os.path.exists(directory_path):
+            os.makedirs(directory_path)
+        self._write_csv_data(file_path, data)
+
+
+class ObjectLabeler:
     """
-    remapped = np.zeros_like(frame_image)
-    for from_value, to_value in mapping:
-        remapped[frame_image == from_value] = to_value
-    return label(remapped, background=0)
-
-def write_to_file_with_directory(file_path, data):
+    Responsible for labeling platelets and thrombi in image frames.
     """
-    Writes data to a CSV file, creating the directory if necessary.
+    def __init__(self, plt_remapping=PLT_REMAPPING, thrombi_remapping=THROMBI_REMAPPING):
+        self.plt_remapping = plt_remapping
+        self.thrombi_remapping = thrombi_remapping
 
-    Args:
-        file_path (str):
-            The path to the output CSV file.
-        data (list):
-            The data to be written to the file.
+    def _label_objects(self, frame_image, mapping):
+        """
+        Remaps pixel values and labels connected components.
+
+        Args:
+            frame_image (np.ndarray): A 2D array representing a single frame.
+            mapping (list of tuples): Remapping rules (from_value, to_value).
+
+        Returns:
+            np.ndarray: A 2D array with labeled connected components.
+        """
+        remapped = np.zeros_like(frame_image)
+        for from_value, to_value in mapping:
+            remapped[frame_image == from_value] = to_value
+        return label(remapped, background=0)
+
+    def _label_objects_in_video(self, video_array, mapping):
+        """
+        Labels objects in each frame of a video using the given mapping.
+
+        Args:
+            video_array (np.ndarray): A 3D array representing the video.
+            mapping (list of tuples): Remapping rules (from_value, to_value).
+
+        Returns:
+            np.ndarray: A 3D array with labeled objects in each frame.
+        """
+        labeled_frames = np.zeros_like(video_array)
+        for time_point, frame_image in enumerate(video_array):
+            labeled_frames[time_point] = self._label_objects(frame_image, mapping)
+        return labeled_frames
+
+    def label_platelets(self, video_array):
+        """
+        Labels platelets in each frame of a video.
+
+        Args:
+            video_array (np.ndarray): A 3D array representing the video.
+
+        Returns:
+            np.ndarray: A 3D array with labeled platelets in each frame.
+        """
+        return self._label_objects_in_video(video_array, self.plt_remapping)
+
+    def label_thrombi(self, video_array):
+        """
+        Labels thrombi in each frame of a video.
+
+        Args:
+            video_array (np.ndarray): A 3D array representing the video.
+
+        Returns:
+            np.ndarray: A 3D array with labeled thrombi in each frame.
+        """
+        return self._label_objects_in_video(video_array, self.thrombi_remapping)
+
+class ThrombiAnalyzer:
     """
-    directory_path = os.path.dirname(file_path)
-    if not os.path.exists(directory_path):
-        os.makedirs(directory_path)
-    save_to_csv(file_path, data)
-
-def preprocess_video(folder, file_name):
+    Responsible for analyzing thrombi properties in image frames.
     """
-    Processes a video file to extract thrombi information.
-    Reads image as an array, crops video
-    Calculate thrrombi number and areas and saves to the file
-    Args:
-        folder (str):
-            The path to the folder containing the video file.
-        file_name (str):
-            The name of the video file.
+    def characterize_thrombi(self, labeled_thrombi_frames):
+        """
+        Calculates thrombi area and number in each frame.
 
-    Returns:
-        tuple[np.ndarray, np.ndarray]: A tuple containing:
-            1. Platelet labels.
-            2. Cropped video array.
+        Args:
+            labeled_thrombi_frames (np.ndarray): A 3D array where each frame
+                has already been labeled for thrombi.
+
+        Returns:
+            tuple: A tuple containing two lists:
+                - thrombi_areas: A list of floats representing the percentage of area covered by thrombi in each frame.
+                - thrombi_number: A list of integers representing the number of thrombi detected in each frame.
+        """
+        duration, height, width = labeled_thrombi_frames.shape
+        video_area = height * width
+
+        thrombi_areas = np.zeros(duration)
+        thrombi_number = np.zeros(duration)
+
+        for time_point, frame_image in enumerate(labeled_thrombi_frames):
+            # No need to remap and label here, it's already done
+            tmp_thrombi_area = [region.area for region in regionprops(frame_image)]
+            thrombi_areas[time_point] = (np.sum(tmp_thrombi_area) / video_area) * 100
+            thrombi_number[time_point] = len(tmp_thrombi_area)
+
+        return thrombi_areas.tolist(), thrombi_number.tolist()
+
+class PlateletTracker:
+    """Tracks platelets in a video based on their centroids."""
+    def __init__(self, pixel_size = PIXEL_SIZE,search_range=5, memory=15, filter_threshold=3):
+        self.pixel_size = pixel_size
+        self.search_range = search_range
+        self.memory = memory
+        self.filter_threshold = filter_threshold
+
+    def extract_centroids(self, labels_per_frame):
+        """Extracts the centroids of labeled regions in a video.
+
+        Args:
+            labels_per_frame (np.ndarray):
+                A 3D NumPy array containing the area labels for each frame of the video.
+
+        Returns:
+            pd.DataFrame:
+                A Pandas DataFrame containing the x, y coordinates and frame numbers of the centroids.
+                The DataFrame has the following columns:
+                    - 'x': The x-coordinate of the centroid.
+                    - 'y': The y-coordinate of the centroid.
+                    - 'frame': The frame number.
+        """
+        data = []
+        for frame_number, frame in enumerate(labels_per_frame):
+            for region in regionprops(frame):
+                y, x = region.centroid
+                data.append([x, y, frame_number])
+        return pd.DataFrame(data, columns=['x', 'y', 'frame'])
+
+    def track(self, centroid_data):
+        """
+        Performs object tracking using TrackPy.
+
+        Args:
+            centroid_data (pd.DataFrame): A Pandas DataFrame containing the centroid coordinates 
+                                           and frame numbers of objects to track.
+
+        Returns:
+            pd.DataFrame: A Pandas DataFrame containing the filtered tracks, where each row 
+                           represents a single object at a specific frame. If no tracks are found,
+                           returns an empty DataFrame.
+        """
+        tracks = tp.link(centroid_data, 
+                         search_range=self.search_range / self.pixel_size, 
+                         memory=self.memory)
+        if tracks.empty:
+            print("Warning: No tracks found after linking.")
+            return tracks  # Return the empty DataFrame
+        filtered_tracks = tp.filter_stubs(tracks, threshold=self.filter_threshold)
+        filtered_tracks.rename(columns={'frame': 'frame_y', 'particle': 'track_id'}, inplace=True)
+        return filtered_tracks
+
+class DataVisualizer:
     """
-    video_array = io.imread(folder + file_name)
-    try:
-        video_array = crop_video(video_array)
-    except ValueError as e:
-        print(f"Could not crop video {file_name} : {e}")
-        raise
-
-    duration, height, width = video_array.shape
-    video_area = height * width
-
-    thrombi_areas = np.zeros(duration)
-    thrombi_number = np.zeros(duration)
-
-    unique_labels_plt = np.zeros_like(video_array)
-
-    for time_point, frame_image in enumerate(video_array):
-        lbl_frame_plt = remap_and_label_image(frame_image, PLT_REMAPPING)
-        unique_labels_plt[time_point] = lbl_frame_plt
-
-        lbl_frame_thrombi = remap_and_label_image(frame_image, THROMBI_REMAPPING)
-        tmp_thrombi_area = [region.area for region in regionprops(lbl_frame_thrombi)]
-        thrombi_areas[time_point] = (np.sum(tmp_thrombi_area) / video_area) * 100
-        thrombi_number[time_point] = len(tmp_thrombi_area)
-
-    output_file_name = file_name.split('.ti')[0] + '.csv'
-
-    # Save thrombi data to original folder
-    write_to_file_with_directory(
-        folder + THROMBI_NUM_FOLDER + '/' + output_file_name,
-        thrombi_number.tolist()
-    )
-    write_to_file_with_directory(
-        folder + THROMBI_AREAS_FOLDER + '/' + output_file_name,
-        thrombi_areas.tolist()
-    )
-
-    return unique_labels_plt, video_array
-
-
-def extract_centroids(labels_per_frame):
-    """Extracts the centroids of labeled regions in a video.
-
-    Args:
-        labels_per_frame (np.ndarray):
-        A 3D NumPy array containing the area labels for each frame of the video.
-
-    Returns:
-        pd.DataFrame:
-        A Pandas DataFrame containing the x, y coordinates and frame numbers of the centroids.
+    Handles visualization of data using Napari (optional).
     """
-    data = []
-    for frame_number, frame in enumerate(labels_per_frame):
-        labeled_frame = label(frame)  # Probably we do no need this line
-        for region in regionprops(labeled_frame):
-            y, x = region.centroid
-            data.append([x, y, frame_number])
-    return pd.DataFrame(data, columns=['x', 'y', 'frame'])
+    def _format_for_napari(self, tracks):
+        """
+        Formats a Pandas DataFrame containing object tracking data for Napari.
+
+        Args:
+            tracks (pd.DataFrame):
+                A Pandas DataFrame containing the x, y coordinates and frame numbers of objects.
+                Must have columns: ['track_id', 'frame_y', 'y', 'x'].
+
+        Raises:
+            ValueError: If the input DataFrame is missing any required columns.
+
+        Returns:
+            np.ndarray:
+                A NumPy array formatted for Napari, with columns: ['track_id', 'frame_y', 'y', 'x'].
+                If the input DataFrame is empty, returns an empty NumPy array.
+        """
+        if tracks.empty:
+            print("Warning: No tracks to format for Napari.")
+            return np.empty((0, 4))  # Return an empty array
+        # Ensure the DataFrame has the required columns
+        required_columns = ['track_id', 'frame_y', 'y', 'x']
+        missing_columns = set(required_columns) - set(tracks.columns)
+        if missing_columns:
+            raise ValueError(f"Missing required columns: {missing_columns}")
 
 
-def format_for_napari(tracks):
-    """Formats a Pandas DataFrame containing object tracking data for Napari.
+        tracks.loc[:, 'track_id'] = tracks['track_id'].astype(int)
 
-    Args:
-        tracks (pd.DataFrame):
-            A Pandas DataFrame containing the x, y coordinates and frame numbers of objects.
-            Must have columns: ['particle', 'frame', 'y', 'x'].
+        # Extract the relevant columns and convert to NumPy array
+        formatted_tracks = tracks[required_columns].to_numpy()
+        return formatted_tracks
 
-    Raises:
-        ValueError: If the input DataFrame is missing any required columns.
+    def _export_napari_layers(self, viewer, output_path):
+        """
+        Exports the layers from a Napari viewer to a multi-page TIFF file.
 
-    Returns:
-        np.ndarray:
-            A NumPy array formatted for Napari, with columns: ['particle', 'frame', 'y', 'x'].
-    """
-    # Ensure the DataFrame has the required columns
-    required_columns = ['particle', 'frame', 'y', 'x']
-    missing_columns = set(required_columns) - set(tracks.columns)
-    if missing_columns:
-        raise ValueError(f"Missing required columns: {missing_columns}")
-
-
-    tracks.loc[:, 'particle'] = tracks['particle'].astype(int)
-
-    # Extract the relevant columns and convert to NumPy array
-    formatted_tracks = tracks[required_columns].to_numpy()
-    return formatted_tracks
-
-
-def calculate_turn_angles(track):
-    """Calculates the turn angles between consecutive segments of a track.
-
-    Args:
-        tracks (pd.DataFrame):
-            A Pandas DataFrame containing the x, y coordinates and frame numbers of objects.
-            Must have columns: ['particle', 'frame', 'y', 'x'].
-
-    Returns:
-        np.ndarray:
-            A NumPy array containing the turn angles (in degrees) between consecutive segments of the track.
-            The length of the array will be one less than the number of rows in the input DataFrame.
-    Raises:
-        ValueError: If the input DataFrame contains data for more than one particle ID.
-    """
-
-    # Check if there's only one particle ID
-    if len(track['particle'].unique()) > 1:
-        raise ValueError(
-            "This function expects data for a single particle ID. Please filter your data accordingly."
-        )
-
-    # Calculate the angle between consecutive segments
-    angles = []
-    for i in range(1, len(track) - 1):
-        p1 = track.iloc[i - 1][['x', 'y']]
-        p2 = track.iloc[i][['x', 'y']]
-        p3 = track.iloc[i + 1][['x', 'y']]
-
-        v1 = p2 - p1
-        v2 = p3 - p2
-
-        # Normalize vectors
-        v1_norm, v2_norm = np.linalg.norm(v1), np.linalg.norm(v2)
-        v1 = v1 / v1_norm if v1_norm > 0 else v1
-        v2 = v2 / v2_norm if v2_norm > 0 else v2
-
-        # Calculate the angle in degrees
-        angle = np.degrees(np.arccos(np.clip(np.dot(v1, v2), -1.0, 1.0)))
-        angles.append(angle)
-
-    return angles
-
-def calculate_direction_angle(first_point, last_point):
-    """Calculates the direction angle of a motion vector relative to a downward direction.
-
-    Args:
-        first_point (pd.Series):
-            A pandas series, initial x, y coordinates (float64)
-        last_point (pd.Series):
-            A pandas series, initial x, y coordinates (float64)
-
-    Returns:
-        float:
-            The direction angle in degrees.
-            0 degrees for downward, 90 degrees for rightward,
-            180 degrees for upward, and 270 degrees for leftward.
-
-    Raises:
-        ValueError: If either `first_point` or `last_point` is not a 2D NumPy array.
-    """
-    if not isinstance(first_point, pd.Series) or not all(col in first_point for col in ['x', 'y']):
-        raise ValueError("last_point must be a Pandas Series with 'x' and 'y' columns.")
-
-    if not isinstance(last_point, pd.Series) or not all(col in last_point for col in ['x', 'y']):
-        raise ValueError("last_point must be a Pandas Series with 'x' and 'y' columns.")
-
-    motion_vector = last_point - first_point
-    motion_vector_norm = np.linalg.norm(motion_vector)
-    motion_vector = motion_vector / motion_vector_norm if motion_vector_norm else motion_vector
-
-    vertical_vector = np.array([0, -1])  # Assuming the positive y-direction is down
-    angle = np.degrees(np.arccos(np.clip(np.dot(motion_vector, vertical_vector), -1.0, 1.0)))
-    return angle
-
-import numpy as np
-
-def calculate_total_displacement(particle_tracks):
-    """Calculates displacement between the first and last points of a track."""
-    first_point = particle_tracks.iloc[0][['x', 'y']]
-    last_point = particle_tracks.iloc[-1][['x', 'y']]
-    return np.sqrt((last_point['x'] - first_point['x'])**2 + (last_point['y'] - first_point['y'])**2)
-
-def classify_track(particle_tracks, min_displacement, min_duration, max_turn_angle, max_direction_angle):
-    """Classifies a track based on its displacement, duration, and angles."""
-    displacement = calculate_total_displacement(particle_tracks)
-    duration = len(particle_tracks)
-    direction_angle = calculate_direction_angle(particle_tracks.iloc[0][['x', 'y']], particle_tracks.iloc[-1][['x', 'y']])
-    turn_angles = calculate_turn_angles(particle_tracks)
-
-    if displacement >= min_displacement and duration >= min_duration and direction_angle <= max_direction_angle and all(angle <= max_turn_angle for angle in turn_angles):
-        return 'valid'
-    elif displacement < min_displacement and duration < min_duration:
-        return 'bumped'
-    elif displacement < min_displacement * 1.5 and duration >= min_duration * 10:
-        return 'motionless'
-    elif displacement >= min_displacement and duration >= min_duration and direction_angle > max_direction_angle:
-        return 'direction'
-    elif displacement >= min_displacement and duration >= min_duration and not all(angle <= max_turn_angle for angle in turn_angles):
-        return 'turn_angle'
-    else:
-        return 'other'
-
-def filter_tracks_by_displacement_and_duration(
-    tracks,
-    min_displacement,
-    min_duration=5,
-    max_turn_angle=120,
-    max_direction_angle=45
-):
-    """
-    Filters tracks based on displacement, duration, turn angles, and direction angles.
-
-    Args:
-        tracks (pd.DataFrame): A Pandas DataFrame containing track information.
-        min_displacement (float): The minimum displacement for a track to be considered valid.
-        min_duration (int, optional): The minimum valid track duration (default: 5 frames).
-        max_turn_angle (float, optional): The maximum allowed turn angle for a track (default: 120 degrees).
-        max_direction_angle (float, optional): The maximum allowed direction angle for a track (default: 45 degrees).
-
-    Returns:
-        tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-            A tuple containing four DataFrames:
-                - filtered_tracks: Tracks that meet all filtering criteria.
-                - bumped_tracks: Tracks with displacement less than `min_displacement` and duration less than `min_duration`.
-                - motionless_tracks: Tracks with displacement less than 1.5 times `min_displacement` and duration greater than 10 times `min_duration`.
-                - other_tracks: Tracks that do not meet any of the other criteria.
-    """
-    status_dict = {'valid': [], 'bumped': [], 'motionless': [], 'direction' : [], 'turn_angle' : [], 'other': []}
-    num_of_tracks = len(tracks['particle'].unique())
-
-    print(f"Filtering {num_of_tracks} tracks")
-
-    count = 0
-    for particle in tracks['particle'].unique():
-        if count % 500 == 0:
-            print(f"Processed {count} tracks")
-        count += 1
-        particle_tracks = tracks[tracks['particle'] == particle]
+        Args:
+            viewer (napari.Viewer): The Napari viewer containing the layers to export.
+            output_path (str): The path to save the output TIFF file.
+        """
+        layers_data = []
         
-        # Classify track based on criteria
-        track_status = classify_track(particle_tracks, min_displacement, min_duration, max_turn_angle, max_direction_angle)
+        # Iterate over all layers in the viewer
+        for layer in viewer.layers:
+            if isinstance(layer, napari.layers.Image):
+                layers_data.append(layer.data)
+            elif isinstance(layer, napari.layers.Labels):
+                layers_data.append(layer.data)
+            elif isinstance(layer, napari.layers.Tracks):
+                # For tracks, we'll create a mask or image representation
+                track_data = np.zeros_like(viewer.layers[0].data, dtype=np.uint8)  # Assuming same size as first image layer
+                for track in layer.data:
+                    coords = track[1:].astype(int)  # Coordinates are in the second and third columns
+                    track_data[tuple(coords)] = 255  # Mark track locations
+                layers_data.append(track_data)
         
-        # Store the particle ID based on its classification
-        status_dict[track_status].append(particle)
+        # Stack all layers along the first axis
+        stacked_layers = np.stack(layers_data, axis=0)
 
-    # Filter tracks DataFrame based on classified statuses
-    filtered_tracks = tracks[tracks['particle'].isin(status_dict['valid'])]
-    bumped_tracks = tracks[tracks['particle'].isin(status_dict['bumped'])]
-    motionless_tracks = tracks[tracks['particle'].isin(status_dict['motionless'])]
-    direction_tracks = tracks[tracks['particle'].isin(status_dict['direction'])]
-    turn_angle_tracks = tracks[tracks['particle'].isin(status_dict['turn_angle'])]
-    other_tracks = tracks[tracks['particle'].isin(status_dict['other'])]
+        output_dir = os.path.dirname(output_path)
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
 
-    return filtered_tracks, bumped_tracks, motionless_tracks, direction_tracks, turn_angle_tracks, other_tracks
+        tiff.imwrite(output_path, stacked_layers, bigtiff=True, photometric='minisblack', compression='zlib')
+        print(f"Exported layers saved to {output_path}")
 
+    def visualize_data(self, tracks, plt_labels, init_vid, napari_file=None):
+        """
+        Visualizes data in Napari.
 
-def track_trackpy(plt_labels, pixel_size, init_vid, view=True, view_modes=[ViewMode.ROLLING], napari_file=None):
-    """
-    Tracks objects in a video using TrackPy, shows tracks using napari (optional).
-
-    Args:
-        plt_labels (np.ndarray): A 3D NumPy array containing the platelet labels for each frame of the video.
-        pixel_size (float): The size of a pixel in the video (in physical units).
-        init_vid (np.ndarray): The original video data (used for visualization if view is True).
-        view (bool, optional): Whether to display the tracks in Napari (default: True).
-        view_modes (list[ViewMode], optional): A list of view modes to activate.
-        napari_file: file to store napari layers
-
-    Returns:
-        tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-            A tuple containing four DataFrames:
-                - filtered_tracks: Tracks that meet your filtering criteria (e.g., minimum displacement).
-                - bumped_tracks: Tracks with significant displacement events.
-                - motionless_tracks: Tracks with minimal displacement.
-                - direction_tracks: Tracks with invalid direction
-                - turn_angle_tracks: Tracks with invalid turn angles
-                - other_tracks: Tracks that do not meet any of the other criteria.
-    """
-    centroid_data = extract_centroids(plt_labels)
-
-    print("Running tracking")
-    # Run tracking using trackpy
-    tracks = tp.link(centroid_data, search_range=5 / pixel_size, memory=15)
-    print("Tracking done")
-
-    # Filter the tracks (optional, based on your criteria)
-    filtered_tracks = tp.filter_stubs(tracks, threshold=3)  # Remove short tracks
-    print("Short tracks filtered")
-
-    # Updated to unpack all four returned DataFrames
-    filtered_tracks, bumped_tracks, motionless_tracks, direction_tracks, turn_angle_tracks, other_tracks = filter_tracks_by_displacement_and_duration(
-        filtered_tracks,
-        min_displacement= 7.5 / pixel_size
-    )
-
-    print("Bumped, motionless, and other tracks filtered")
-
-    if view:
+        Args:
+            tracks (pd.DataFrame): A Pandas DataFrame containing the tracking data.
+            plt_labels (np.ndarray): A NumPy array containing the platelet labels.
+            init_vid (np.ndarray): A NumPy array representing the initial video data.
+            napari_file (str, optional): The path to save the Napari layers as a multi-page TIFF file. 
+                                        Defaults to None (no saving).
+        """
         print("Napari view")
-        napari_tracks = format_for_napari(filtered_tracks)
-        napari_bump = format_for_napari(bumped_tracks)
-        napari_motionless = format_for_napari(motionless_tracks)
-        napari_direction = format_for_napari(direction_tracks)
-        napari_turn_angle = format_for_napari(turn_angle_tracks)
+        napari_tracks = self._format_for_napari(tracks)
 
         viewer = napari.Viewer()
         viewer.add_labels(init_vid, name='InitialVideo')
         viewer.add_labels(plt_labels, name='PlateletMasks')
 
-        if ViewMode.ROLLING in view_modes:
-            viewer.add_tracks(napari_tracks, name='Rolling')
-        if ViewMode.BUMPED in view_modes:
-            viewer.add_tracks(napari_bump, name='Bump')
-        if ViewMode.MOTIONLESS in view_modes:
-            viewer.add_tracks(napari_motionless, name='Motionless')
-        if ViewMode.INVALID_DIRECTION in view_modes:
-            viewer.add_tracks(napari_direction, name='Invalid Direction')
-        if ViewMode.INVALID_TURN_ANGLE in view_modes:
-            viewer.add_tracks(napari_turn_angle, name='Invalid Turn Angles')
+        viewer.add_tracks(napari_tracks, name='All')
 
         napari.run()
         if napari_file is not None:
-            export_napari_layers(viewer, napari_file)
+            self._export_napari_layers(viewer, napari_file)
 
-    return filtered_tracks, bumped_tracks, motionless_tracks, direction_tracks, turn_angle_tracks, other_tracks
+class AnalysisPipeline:
+    """
+    Orchestrates the entire analysis process.
+    """
+    def __init__(self, data_folder, pixel_size=PIXEL_SIZE):
+        self.data_folder = data_folder
+        self.video_processor = VideoProcessor(pixel_size=pixel_size)
+        self.object_labeler = ObjectLabeler()
+        self.thrombi_analyzer = ThrombiAnalyzer()
+        self.platelet_tracker = PlateletTracker(pixel_size=pixel_size)
+        self.data_visualizer = DataVisualizer() # init with data_folder
 
+    def process_file(self, file_name, visualize):
+        """
+        Processes a single .tif file.
 
-def export_napari_layers(viewer, output_path):
-    # Initialize a list to store the layers data
-    layers_data = []
-    
-    # Iterate over all layers in the viewer
-    for layer in viewer.layers:
-        if isinstance(layer, napari.layers.Image):
-            layers_data.append(layer.data)
-        elif isinstance(layer, napari.layers.Labels):
-            layers_data.append(layer.data)
-        elif isinstance(layer, napari.layers.Tracks):
-            # For tracks, we'll create a mask or image representation
-            track_data = np.zeros_like(viewer.layers[0].data, dtype=np.uint8)  # Assuming same size as first image layer
-            for track in layer.data:
-                coords = track[1:].astype(int)  # Coordinates are in the second and third columns
-                track_data[tuple(coords)] = 255  # Mark track locations
-            layers_data.append(track_data)
-    
-    # Stack all layers along the first axis
-    stacked_layers = np.stack(layers_data, axis=0)
-    tiff.imwrite(output_path, stacked_layers, bigtiff=True, photometric='minisblack', compression='zlib')
-    print(f"Exported layers saved to {output_path}")
-
-def evaluate_tracks(tracks, folder, filename, pixel_size, postfix):
-
-
-    tracks.rename(columns={'frame': 'frame_y', 'particle': 'track_id'}, inplace=True)
-    tracks['Time (s)'] = tracks['frame_y'] * DT
-
-    track_distance_df = calculate_distance(tracks, pixel_size=pixel_size)
-    track_distance_df = calculate_speed_corr(track_distance_df)
-    track_distance_df = calculate_displacement(track_distance_df, pixel_size=pixel_size)
-
-    track_distance_df = confinement_ratio(track_distance_df)
-    track_distance_df = mean_straight_line_speed(track_distance_df)
-    track_distance_df = calc_linearity_of_forward_progression_and_sort(track_distance_df)
-
-    track_means = average_tracks(track_distance_df, pixel_size=pixel_size)
-
-
-    csv_file_dir = os.path.join(folder, "Averaged CSV")
-    if not os.path.exists(csv_file_dir):
-        os.makedirs(csv_file_dir, exist_ok=True)
-
-    csv_file_tot = os.path.join(folder, "Tracked CSV")
-    if not os.path.exists(csv_file_tot):
-        os.makedirs(csv_file_tot, exist_ok=True)
-
-    storage_dir = os.path.join(csv_file_dir, filename[:-4])
-    total_dir = os.path.join(csv_file_tot, filename[:-4])
-    storage_dir = storage_dir + postfix + ".csv"
-    total_dir = total_dir + postfix + ".csv"
-
-    track_means.to_csv(storage_dir)
-    track_distance_df.to_csv(total_dir)
-
-
-def analyze_stacks(data_folder, file_name):
-    start_time_preprocess = time.time()
-
-    plt_labels, vid = preprocess_video(folder=data_folder, file_name=file_name)
-
-    time_preprocess = time.time() - start_time_preprocess
-    print(f"Preprocessing is complete for {file_name}. Elapsed time: {time_preprocess}")
-
-    napari_file_dir = os.path.join(data_folder, "Napari")
-    if not os.path.exists(napari_file_dir):
-        os.makedirs(napari_file_dir, exist_ok=True)
+        Args:
+            file_name (str): The name of the .tif file to process.
+        """
+        file_start_time = time.time()
+        print(f"Processing file: {file_name}...")
         
-    # Updated to capture 'other_tracks' as well
-    final_tracks, bumped_tracks, motionless_tracks, direction_tracks, \
-    turn_angles_tracks, other_tracks = track_trackpy(
-        plt_labels=plt_labels,
-        pixel_size=PIXEL_SIZE,
-        init_vid=vid,
-        view=True,
-        view_modes=[
-            ViewMode.ROLLING, 
-            ViewMode.MOTIONLESS, 
-            ViewMode.BUMPED, 
-            ViewMode.INVALID_DIRECTION, 
-            ViewMode.INVALID_TURN_ANGLE
-        ],
-        napari_file=os.path.join(napari_file_dir, file_name)
-    )
+        video_array = self.video_processor.load_file(os.path.join(self.data_folder, file_name))
+        video_array = self.video_processor.crop_video(video_array)
 
+        plt_labels = self.object_labeler.label_platelets(video_array)
+        thrombi_labels =self.object_labeler.label_thrombi(video_array)
+        thrombi_areas, thrombi_number = self.thrombi_analyzer.characterize_thrombi(thrombi_labels)
+        
+        thrombi_areas_file_name = file_name.replace('.tif', THROMBI_AREAS_SUFFIX)
+        thrombi_num_file_name = file_name.replace('.tif', THROMBI_NUMBER_SUFFIX)
+        self.video_processor.save_data(os.path.join(self.data_folder, THROMBI_AREAS_SUBFOLDER, thrombi_areas_file_name), thrombi_areas)
+        self.video_processor.save_data(os.path.join(self.data_folder, THROMBI_NUM_SUBFOLDER, thrombi_num_file_name), thrombi_number)
 
-    # Evaluate the generated tracks
-    evaluate_tracks(tracks=final_tracks, pixel_size=PIXEL_SIZE, folder=data_folder,
-                    filename=file_name, postfix='_rolling')
-    evaluate_tracks(tracks=bumped_tracks, pixel_size=PIXEL_SIZE, folder=data_folder,
-                    filename=file_name, postfix='_bumped')
-    evaluate_tracks(tracks=motionless_tracks, pixel_size=PIXEL_SIZE, folder=data_folder,
-                    filename=file_name, postfix='_motionless')
-    evaluate_tracks(tracks=direction_tracks, pixel_size=PIXEL_SIZE, folder=data_folder,
-                    filename=file_name, postfix='_direction_tracks')
-    evaluate_tracks(tracks=turn_angles_tracks, pixel_size=PIXEL_SIZE, folder=data_folder,
-                    filename=file_name, postfix='_turn_angles_tracks')
-    evaluate_tracks(tracks=other_tracks, pixel_size=PIXEL_SIZE, folder=data_folder,
-                    filename=file_name, postfix='_other')
+        centroid_data = self.platelet_tracker.extract_centroids(plt_labels)
+        final_tracks = self.platelet_tracker.track(centroid_data)
+        
+        tracked_file_name = file_name.replace('.tif', TRACKED_SUFFIX)
+        self.video_processor.save_data(os.path.join(self.data_folder, TRACKED_SUBFOLDER, tracked_file_name), final_tracks)
 
+        if visualize: # (Or use a configuration flag for visualization)
+            napari_file_path = os.path.join(self.data_folder, NAPARI_SUBFOLDER, file_name)
+            self.data_visualizer.visualize_data(final_tracks, plt_labels, video_array, napari_file_path) 
 
+        file_end_time = time.time()  # End timing for the file
+        file_processing_time = file_end_time - file_start_time
+        print(f"Finished processing {file_name} in {file_processing_time:.2f} seconds.")
 
-def process_file(folder):
-    """Function that runs processing for a file and reports that"""
-    file_name = folder.split('/')[-1]
-    folder = folder.replace(file_name, '')
-
-    print('Processing the following file: ', file_name)
-    analyze_stacks(folder, file_name)
-    print('Completed processing for: ', file_name)
-
-
-def list_folders(directory):
-    """List all folders in a given directory."""
-    return [d for d in os.listdir(directory) if os.path.isdir(os.path.join(directory, d))]
-
-
-def track_ilastik(glob_path):
-    """Function that runs processing for each .tif from a given folder."""
-
-    l_o_files = [str(tif_file) for tif_file in Path(glob_path).rglob('*.tif')]
-    for file in l_o_files:
-        process_file(file)
+    def run(self, visualize):
+        """Processes all .tif files in the data folder."""
+        for file_name in os.listdir(self.data_folder):
+            if file_name.endswith(".tif"):
+                self.process_file(file_name, visualize)
 
 
 def main():
-    # Argument parser for command line arguments
     parser = argparse.ArgumentParser(description='Process and track objects in .tif files from a given directory.')
     parser.add_argument('path', type=str, help='The path to the directory containing .tif files to process.')
-    
+    parser.add_argument('--visualize', action='store_true', 
+                    help='Visualize results using Napari (default: False)')
     args = parser.parse_args()
     
     start_time = time.time()
     
-    # Start processing files
+    pipeline = AnalysisPipeline(data_folder=args.path)
     print(f"Processing files in directory: {args.path}")
-    track_ilastik(glob_path=args.path)
+    pipeline.run(visualize=args.visualize)
     
     end_time = time.time()
-    print(f'Completed. Elapsed time: {end_time - start_time} seconds')
+    processing_time = end_time - start_time
+    print(f'Completed. Elapsed time: {processing_time:.2f} seconds')
 
 
 if __name__ == '__main__':
     main()
+
