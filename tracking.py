@@ -14,17 +14,22 @@ import pandas as pd
 logging.getLogger('trackpy').setLevel(logging.WARNING)
 import tifffile as tiff
 
+# Subfolder names for organizing output data
 THROMBI_NUM_SUBFOLDER = 'ThrombiNumbers'
 THROMBI_AREAS_SUBFOLDER = 'ThrombiAreas'
 TRACKED_SUBFOLDER = 'Tracked CSV'
 NAPARI_SUBFOLDER = 'Napari'
 
+# Suffixes for output file names
 THROMBI_AREAS_SUFFIX = '_thrombi_areas.csv'
 THROMBI_NUMBER_SUFFIX = '_thrombi_number.csv'
 TRACKED_SUFFIX = '_tracked.csv'
 
+# Remapping rules for pixel values during labeling
 PLT_REMAPPING = [(0, 0), (1, 0), (2, 1)]
 THROMBI_REMAPPING = [(0, 0), (1, 1), (2, 0)]
+
+# Pixel size for calculations (in micrometers)
 PIXEL_SIZE = 0.431
 
 class VideoProcessor:
@@ -300,8 +305,8 @@ class DataVisualizer:
         """
         if tracks.empty:
             print("Warning: No tracks to format for Napari.")
-            return np.empty((0, 4))  # Return an empty array
-        # Ensure the DataFrame has the required columns
+            return np.empty((0, 4))
+
         required_columns = ['track_id', 'frame_y', 'y', 'x']
         missing_columns = set(required_columns) - set(tracks.columns)
         if missing_columns:
@@ -382,7 +387,7 @@ class AnalysisPipeline:
         self.object_labeler = ObjectLabeler()
         self.thrombi_analyzer = ThrombiAnalyzer()
         self.platelet_tracker = PlateletTracker(pixel_size=pixel_size)
-        self.data_visualizer = DataVisualizer() # init with data_folder
+        self.data_visualizer = DataVisualizer()
 
     def process_file(self, file_name, visualize):
         """
@@ -412,11 +417,11 @@ class AnalysisPipeline:
         tracked_file_name = file_name.replace('.tif', TRACKED_SUFFIX)
         self.video_processor.save_data(os.path.join(self.data_folder, TRACKED_SUBFOLDER, tracked_file_name), final_tracks)
 
-        if visualize: # (Or use a configuration flag for visualization)
+        if visualize:
             napari_file_path = os.path.join(self.data_folder, NAPARI_SUBFOLDER, file_name)
             self.data_visualizer.visualize_data(final_tracks, plt_labels, video_array, napari_file_path) 
 
-        file_end_time = time.time()  # End timing for the file
+        file_end_time = time.time()
         file_processing_time = file_end_time - file_start_time
         print(f"Finished processing {file_name} in {file_processing_time:.2f} seconds.")
 
