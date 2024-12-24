@@ -15,6 +15,8 @@ logging.getLogger('trackpy').setLevel(logging.WARNING)
 import tifffile as tiff
 
 # Subfolder names for organizing output data
+PLATELET_NUM_SUBFOLDER = 'PlateletNumbers'
+PLATELET_AREAS_SUBFOLDER = 'PlateletAreas'
 THROMBI_NUM_SUBFOLDER = 'ThrombiNumbers'
 THROMBI_AREAS_SUBFOLDER = 'ThrombiAreas'
 TRACKED_SUBFOLDER = 'Tracked CSV'
@@ -23,6 +25,8 @@ NAPARI_SUBFOLDER = 'Napari'
 # Suffixes for output file names
 THROMBI_AREAS_SUFFIX = '_thrombi_areas.csv'
 THROMBI_NUMBER_SUFFIX = '_thrombi_number.csv'
+PLATELET_AREAS_SUFFIX = '_platelet_areas.csv'
+PLATELET_NUMBER_SUFFIX = '_platelet_number.csv'
 TRACKED_SUFFIX = '_tracked.csv'
 
 # Remapping rules for pixel values during labeling
@@ -40,59 +44,29 @@ class VideoProcessor:
         self.pixel_size = pixel_size
 
     def load_file(self, file_path):
-        """
-        Loads a .tif image stack.
+        """Loads a .tif image stack, checking for file existence and non-zero size.
 
         Args:
             file_path (str): The path to the .tif file.
 
         Returns:
             ndarray: The loaded image stack as a NumPy array.
-        """
-        return io.imread(file_path)
-
-    def crop_video(self, vid):
-        """Crops a 3D numpy array representing a video stack.
-
-        Removes empty rows along the y-axis.
-
-        Args:
-            vid (ndarray of dtype int):
-                A 3D numpy array representing a video stack with dimensions (depth, height, width).
-                The array should contain pixel values where non-zero values are considered for cropping.
-
-        Raises:
-            ValueError: If all pixels are zero.
-
-        Returns:
-            ndarray of dtype int:
-                A cropped 3D numpy array with the same depth and width as the input,
-                but with reduced height such that only rows containing
-                non-zero values are retained.
-        Notes:
-            - The function assumes that the input video stack is a numpy array.
-            - Non-zero values are defined as values strictly greater than 1.
-            - The cropping is performed along the y-axis (height).
+            Raises:
+                FileNotFoundError: if the file does not exist
+                ValueError: if the file is empty
         """
 
-        # Find the indices where any value in time (axis=0) is greater than 1
-        y_indices = np.any(vid > 1, axis=0)
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
 
-        # Find the rows (y-axis) where there are non-zero values
-        non_zero_rows = np.any(y_indices, axis=1)
+        try:
+            image_stack = io.imread(file_path)
+            if image_stack.size == 0:
+                raise ValueError(f"File is empty: {file_path}")
+            return image_stack
 
-        if not np.any(non_zero_rows):
-            raise ValueError("Video has no non-zero rows.")
-
-        # Get the overall top and bottom y indices
-        overall_low_y = np.argmax(non_zero_rows) # first non-zero column
-        overall_top_y = len(non_zero_rows) - np.argmax(non_zero_rows[::-1]) - 1 # last non-zero col
-
-        # Crop the stack
-        cropped_stack = vid[:, overall_low_y:overall_top_y + 1, :]
-
-        return cropped_stack
-
+        except (IOError, ValueError) as e:
+            raise ValueError(f"Error loading file {file_path}: {e}")
 
     def _write_csv_data(self, file_path, data):
         """
@@ -135,9 +109,7 @@ class VideoProcessor:
 
 
 class ObjectLabeler:
-    """
-    Responsible for labeling platelets and thrombi in image frames.
-    """
+    """Labels platelets and thrombi in image frames."""
     def __init__(self, plt_remapping=PLT_REMAPPING, thrombi_remapping=THROMBI_REMAPPING):
         self.plt_remapping = plt_remapping
         self.thrombi_remapping = thrombi_remapping
@@ -198,36 +170,36 @@ class ObjectLabeler:
         """
         return self._label_objects_in_video(video_array, self.thrombi_remapping)
 
-class ThrombiAnalyzer:
+class ClassesAnalyzer:
     """
-    Responsible for analyzing thrombi properties in image frames.
+    Responsible for analyzing class properties in image frames.
     """
-    def characterize_thrombi(self, labeled_thrombi_frames):
+    def characterize(self, labeled_frames):
         """
-        Calculates thrombi area and number in each frame.
+        Calculates area that belongs to a class and a number of objects that belong to a class
 
         Args:
-            labeled_thrombi_frames (np.ndarray): A 3D array where each frame
-                has already been labeled for thrombi.
+            labeled_frames (np.ndarray): A 3D array where each frame
+                has already been labeled for a certain class.
 
         Returns:
             tuple: A tuple containing two lists:
-                - thrombi_areas: A list of floats representing the percentage of area covered by thrombi in each frame.
-                - thrombi_number: A list of integers representing the number of thrombi detected in each frame.
+                - areas: A list of floats representing the percentage of area that belongs to a class.
+                - number: A list of integers representing the number of objects detected in each frame.
         """
-        duration, height, width = labeled_thrombi_frames.shape
+        duration, height, width = labeled_frames.shape
         video_area = height * width
 
-        thrombi_areas = np.zeros(duration)
-        thrombi_number = np.zeros(duration)
+        areas = np.zeros(duration)
+        number = np.zeros(duration)
 
-        for time_point, frame_image in enumerate(labeled_thrombi_frames):
+        for time_point, frame_image in enumerate(labeled_frames):
             # No need to remap and label here, it's already done
-            tmp_thrombi_area = [region.area for region in regionprops(frame_image)]
-            thrombi_areas[time_point] = (np.sum(tmp_thrombi_area) / video_area) * 100
-            thrombi_number[time_point] = len(tmp_thrombi_area)
+            tmp_area = [region.area for region in regionprops(frame_image)]
+            areas[time_point] = (np.sum(tmp_area) / video_area) * 100
+            number[time_point] = len(tmp_area)
 
-        return thrombi_areas.tolist(), thrombi_number.tolist()
+        return areas.tolist(), number.tolist()
 
 class PlateletTracker:
     """Tracks platelets in a video based on their centroids."""
@@ -272,9 +244,13 @@ class PlateletTracker:
                            represents a single object at a specific frame. If no tracks are found,
                            returns an empty DataFrame.
         """
-        tracks = tp.link(centroid_data, 
-                         search_range=self.search_range / self.pixel_size, 
-                         memory=self.memory)
+        try:
+            tracks = tp.link(centroid_data, 
+                            search_range=self.search_range / self.pixel_size, 
+                            memory=self.memory)
+        except Exception as e:
+            print(f"Warning: Trackpy linking failed. Error: {e}")  # Print detailed error information
+            return pd.DataFrame() # Return empty DataFrame
         if tracks.empty:
             print("Warning: No tracks found after linking.")
             return tracks  # Return the empty DataFrame
@@ -283,6 +259,7 @@ class PlateletTracker:
         return filtered_tracks
 
 class DataVisualizer:
+    TRACK_MASK_VALUE = 255
     """
     Handles visualization of data using Napari (optional).
     """
@@ -340,7 +317,7 @@ class DataVisualizer:
                 track_data = np.zeros_like(viewer.layers[0].data, dtype=np.uint8)  # Assuming same size as first image layer
                 for track in layer.data:
                     coords = track[1:].astype(int)  # Coordinates are in the second and third columns
-                    track_data[tuple(coords)] = 255  # Mark track locations
+                    track_data[tuple(coords)] = self.TRACK_MASK_VALUE  # Mark track locations
                 layers_data.append(track_data)
         
         # Stack all layers along the first axis
@@ -385,38 +362,111 @@ class AnalysisPipeline:
         self.data_folder = data_folder
         self.video_processor = VideoProcessor(pixel_size=pixel_size)
         self.object_labeler = ObjectLabeler()
-        self.thrombi_analyzer = ThrombiAnalyzer()
+        self.classes_analyzer = ClassesAnalyzer()
         self.platelet_tracker = PlateletTracker(pixel_size=pixel_size)
         self.data_visualizer = DataVisualizer()
 
-    def process_file(self, file_name, visualize):
+    def _load_file(self, file_name):
+        """Loads a .tif file and handles potential errors.
+
+        Args:
+            file_name (str): The name of the .tif file within the data folder.
+
+        Returns:
+            np.ndarray or None: The loaded video array if successful, None otherwise.
+        """
+        try:
+            video_array = self.video_processor.load_file(os.path.join(self.data_folder, file_name))
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Error processing file {file_name}: {e}")
+            return None
+        return video_array
+
+    def _label_thrombi_and_platelets(self, video_array):
+        """Labels thrombi and platelets in the video array.
+
+        Args:
+            video_array (np.ndarray): The 3D video array.
+
+        Returns:
+            tuple[np.ndarray, np.ndarray]: A tuple containing the labeled platelet and thrombi arrays.
+        """
+        thrombi_labels = self.object_labeler.label_thrombi(video_array)
+        platelet_labels = self.object_labeler.label_platelets(video_array)
+        return platelet_labels, thrombi_labels
+
+    def _analyze_counts(self, plt_labels, thrombi_labels):
+        """Analyzes platelet and thrombi counts and areas.
+
+        Args:
+            plt_labels (np.ndarray): Labeled platelet array.
+            thrombi_labels (np.ndarray): Labeled thrombi array.
+
+        Returns:
+            tuple[list, list, list, list]: Platelet areas, platelet numbers, thrombi areas, thrombi numbers.
+        """
+        platelet_areas, platelet_number = self.classes_analyzer.characterize(plt_labels)
+        thrombi_areas, thrombi_number = self.classes_analyzer.characterize(thrombi_labels)
+        return platelet_areas, platelet_number, thrombi_areas, thrombi_number
+
+    def _track_platelets(self, plt_labels):
+        """Tracks platelets based on their centroids.
+
+        Args:
+            plt_labels (np.ndarray): The labeled platelet array.
+
+        Returns:
+            pd.DataFrame: A DataFrame containing the tracked platelet data.
+        """
+        centroid_data = self.platelet_tracker.extract_centroids(plt_labels)
+        final_tracks = self.platelet_tracker.track(centroid_data)
+        return final_tracks
+
+    def _save_results(self, file_name, platelet_areas, platelet_number, thrombi_areas, thrombi_number, final_tracks):
+        """Saves the analysis results to separate CSV files.
+
+        Args:
+            file_name (str): The original file name (used for output file naming).
+            platelet_areas (list): List of platelet areas.
+            platelet_number (list): List of platelet numbers.
+            thrombi_areas (list): List of thrombi areas.
+            thrombi_number (list): List of thrombi numbers.
+            final_tracks (pd.DataFrame): DataFrame containing tracked platelet data.
+        """
+        platelet_areas_file_name = file_name.replace('.tif', PLATELET_AREAS_SUFFIX)
+        platelet_num_file_name = file_name.replace('.tif', PLATELET_NUMBER_SUFFIX)
+        thrombi_areas_file_name = file_name.replace('.tif', THROMBI_AREAS_SUFFIX)
+        thrombi_num_file_name = file_name.replace('.tif', THROMBI_NUMBER_SUFFIX)
+
+        self.video_processor.save_data(os.path.join(self.data_folder, PLATELET_AREAS_SUBFOLDER, platelet_areas_file_name), platelet_areas)
+        self.video_processor.save_data(os.path.join(self.data_folder, PLATELET_NUM_SUBFOLDER, platelet_num_file_name), platelet_number)
+        self.video_processor.save_data(os.path.join(self.data_folder, THROMBI_AREAS_SUBFOLDER, thrombi_areas_file_name), thrombi_areas)
+        self.video_processor.save_data(os.path.join(self.data_folder, THROMBI_NUM_SUBFOLDER, thrombi_num_file_name), thrombi_number)
+        
+        tracked_file_name = file_name.replace('.tif', TRACKED_SUFFIX)
+        self.video_processor.save_data(os.path.join(self.data_folder, TRACKED_SUBFOLDER, tracked_file_name), final_tracks)
+        
+    def _process_file(self, file_name, visualize):
         """
         Processes a single .tif file.
 
         Args:
             file_name (str): The name of the .tif file to process.
+            visualize (bool): Whether to visualize the results.
         """
         file_start_time = time.time()
         print(f"Processing file: {file_name}...")
         
-        video_array = self.video_processor.load_file(os.path.join(self.data_folder, file_name))
-        video_array = self.video_processor.crop_video(video_array)
+        video_array = self._load_file(file_name)
+        if video_array is None:
+            return
 
-        plt_labels = self.object_labeler.label_platelets(video_array)
-        thrombi_labels =self.object_labeler.label_thrombi(video_array)
-        thrombi_areas, thrombi_number = self.thrombi_analyzer.characterize_thrombi(thrombi_labels)
+        plt_labels, thrombi_labels = self._label_thrombi_and_platelets(video_array)
         
-        thrombi_areas_file_name = file_name.replace('.tif', THROMBI_AREAS_SUFFIX)
-        thrombi_num_file_name = file_name.replace('.tif', THROMBI_NUMBER_SUFFIX)
-        self.video_processor.save_data(os.path.join(self.data_folder, THROMBI_AREAS_SUBFOLDER, thrombi_areas_file_name), thrombi_areas)
-        self.video_processor.save_data(os.path.join(self.data_folder, THROMBI_NUM_SUBFOLDER, thrombi_num_file_name), thrombi_number)
-
-        centroid_data = self.platelet_tracker.extract_centroids(plt_labels)
-        final_tracks = self.platelet_tracker.track(centroid_data)
+        platelet_areas, platelet_number, thrombi_areas, thrombi_number = self._analyze_counts(plt_labels, thrombi_labels)
+        final_tracks = self._track_platelets(plt_labels)
+        self._save_results(file_name, platelet_areas, platelet_number, thrombi_areas, thrombi_number, final_tracks)
         
-        tracked_file_name = file_name.replace('.tif', TRACKED_SUFFIX)
-        self.video_processor.save_data(os.path.join(self.data_folder, TRACKED_SUBFOLDER, tracked_file_name), final_tracks)
-
         if visualize:
             napari_file_path = os.path.join(self.data_folder, NAPARI_SUBFOLDER, file_name)
             self.data_visualizer.visualize_data(final_tracks, plt_labels, video_array, napari_file_path) 
@@ -429,7 +479,7 @@ class AnalysisPipeline:
         """Processes all .tif files in the data folder."""
         for file_name in os.listdir(self.data_folder):
             if file_name.endswith(".tif"):
-                self.process_file(file_name, visualize)
+                self._process_file(file_name, visualize)
 
 
 def main():
