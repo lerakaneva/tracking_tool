@@ -194,7 +194,6 @@ class ClassesAnalyzer:
         number = np.zeros(duration)
 
         for time_point, frame_image in enumerate(labeled_frames):
-            # No need to remap and label here, it's already done
             tmp_area = [region.area for region in regionprops(frame_image)]
             areas[time_point] = (np.sum(tmp_area) / video_area) * 100
             number[time_point] = len(tmp_area)
